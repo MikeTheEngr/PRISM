@@ -39,16 +39,16 @@ async def signup(email: str, password: str) -> dict:
     if not response.user:
         raise HTTPException(status_code=400, detail="Signup failed — no user returned.")
 
-    # Explicitly create the profile row in case the DB trigger isn't set up yet
+    # Explicitly create the profile row
     try:
         supabase.table("profiles").upsert({
             "id": response.user.id,
             "email": email,
             "tier": "free",
         }).execute()
-    except Exception:
-        # Profile may already exist — not fatal
-        pass
+    except Exception as e:
+        # Log but don't fail signup — profile can be recreated on next login
+        print(f"Warning: Profile creation failed for {email}: {e}")
 
     return {
         "user_id": response.user.id,
@@ -78,9 +78,18 @@ async def login(email: str, password: str) -> dict:
     if not response.user or not response.session:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    # Fetch tier from profiles table
+    # Fetch tier from profiles table, auto-create if missing
     profile = supabase.table("profiles").select("tier").eq("id", response.user.id).execute()
-    tier = profile.data[0]["tier"] if profile.data else "free"
+    if not profile.data:
+        # Profile missing — create it now (handles edge cases from signup)
+        supabase.table("profiles").upsert({
+            "id": response.user.id,
+            "email": email,
+            "tier": "free",
+        }).execute()
+        tier = "free"
+    else:
+        tier = profile.data[0]["tier"]
 
     return {
         "user_id": response.user.id,
