@@ -6,23 +6,27 @@ generation succeeded and passed validation — see services/signal_engine.py
 for why we never fabricate or degrade a signal to "fill in" a gap.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from typing import Optional
 
 from app.core.database import get_supabase
 from app.services.coingecko_client import fetch_crypto_prices_batch
 from app.services.alpha_vantage_client import fetch_stock_price
 from app.services.signal_engine import generate_signal
+from app.services.auth_service import get_optional_user
 from app.models.market import SignalOut
+from app.models.auth import UserProfile
 
 router = APIRouter(prefix="/signals", tags=["signals"])
 
 
 @router.get("", response_model=list[SignalOut])
-async def list_signals():
+async def list_signals(user: Optional[UserProfile] = Depends(get_optional_user)):
     """
-    Returns signals for all active assets that currently have valid price data.
-    Powers the AI Signal Feed screen. Assets without a generatable signal
-    are simply omitted from the list, never shown with placeholder data.
+    Returns signals for all active assets.
+    - Anonymous users: first 3 signals only (teaser)
+    - Free tier users: up to 5 signals
+    - Pro users: all signals, no limit
     """
     supabase = get_supabase()
     result = supabase.table("assets").select("*").eq("is_active", True).execute()
@@ -52,9 +56,18 @@ async def list_signals():
             if signal:
                 signals.append(signal)
 
-    # Highest confidence first — most actionable signals surface to the top
+    # Sort by confidence — most actionable first
     signals.sort(key=lambda s: s.confidence, reverse=True)
-    return signals
+
+    # Apply tier limits
+    if user is None:
+        # Anonymous — show 3 as a teaser, prompt to sign up
+        return signals[:3]
+    elif user.tier == "free":
+        return signals[:5]
+    else:
+        # Pro — full access
+        return signals
 
 
 @router.get("/{symbol}", response_model=SignalOut)

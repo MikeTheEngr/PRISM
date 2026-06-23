@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
-from app.api import waitlist, assets, signals, watchlist
+from app.api import waitlist, assets, signals, watchlist, auth
 
 settings = get_settings()
 
@@ -29,6 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(waitlist.router)
 app.include_router(assets.router)
 app.include_router(signals.router)
