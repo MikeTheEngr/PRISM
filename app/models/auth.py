@@ -2,25 +2,23 @@
 PRISM Backend — Auth Models
 """
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 class SignupRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "email": "user@example.com",
-                "password": "securepassword123"
-            }
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {"email": "user@example.com", "password": "securepassword123"}
         }
+    )
+
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(min_length=1, max_length=128)
 
 
 class UserProfile(BaseModel):
@@ -34,7 +32,7 @@ class UserProfile(BaseModel):
 
     @property
     def signal_limit(self) -> int | None:
-        """None means unlimited (Pro). Free users get 5 signals per session."""
+        """None means unlimited (Pro). Free users get 5 signals."""
         return None if self.is_pro else 5
 
     @property

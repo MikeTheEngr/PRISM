@@ -1,54 +1,49 @@
 """
 PRISM Backend — Auth Service
 
-Handles user signup, login, and JWT verification using Supabase Auth.
-All protected endpoints go through verify_token() to extract the user
-and their tier before processing the request.
+Supabase Auth issues and checks tokens; our `profiles` table stores the tier.
 
-Design decisions:
-- Supabase Auth handles the heavy lifting (token issuance, refresh, expiry)
-- We maintain our own profiles table (linked to auth.users) for app-level
-  data like tier, preferences, etc. that Supabase Auth doesn't store
-- Tokens are verified server-side on every protected request — no client
-  trust, no "just check the frontend" shortcuts
+The Supabase client is synchronous, so blocking calls run in a threadpool
+(run_in_threadpool) to avoid freezing the whole server on every request.
 """
 
-from fastapi import HTTPException, Header
+import logging
+
+from fastapi import Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from supabase import AuthApiError
 
-from app.core.database import get_supabase
+from app.core.database import get_auth_client, get_supabase, get_token_verifier
 from app.models.auth import UserProfile
 
+logger = logging.getLogger("prism.auth")
+bearer_scheme = HTTPBearer(auto_error=False)
 
-async def signup(email: str, password: str) -> dict:
-    """
-    Create a new user account. Returns session tokens on success.
-    Profile row is created automatically via Supabase trigger or
-    explicitly here as a fallback.
-    """
-    supabase = get_supabase()
 
+def _signup_sync(email: str, password: str) -> dict:
+    auth = get_auth_client()
     try:
-        response = supabase.auth.sign_up({
-            "email": email,
-            "password": password,
-        })
-    except AuthApiError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        response = auth.auth.sign_up({"email": email, "password": password})
+    except AuthApiError as exc:
+        # Log the real reason, but don't show it to the user: it can reveal
+        # whether an email is already registered.
+        logger.info("signup rejected: %s", getattr(exc, "message", "AuthApiError"))
+        raise HTTPException(
+            status_code=400,
+            detail="Could not create the account. Check your details and try again.",
+        )
 
     if not response.user:
-        raise HTTPException(status_code=400, detail="Signup failed — no user returned.")
+        raise HTTPException(status_code=400, detail="Could not create the account.")
 
-    # Explicitly create the profile row
     try:
-        supabase.table("profiles").upsert({
-            "id": response.user.id,
-            "email": email,
-            "tier": "free",
-        }).execute()
-    except Exception as e:
-        # Log but don't fail signup — profile can be recreated on next login
-        print(f"Warning: Profile creation failed for {email}: {e}")
+        get_supabase().table("profiles").upsert(
+            {"id": response.user.id, "email": email, "tier": "free"}
+        ).execute()
+    except Exception:
+        # Profile is re-created on next login, so don't fail the signup.
+        logger.exception("profile creation failed for new user %s", response.user.id)
 
     return {
         "user_id": response.user.id,
@@ -56,37 +51,26 @@ async def signup(email: str, password: str) -> dict:
         "tier": "free",
         "access_token": response.session.access_token if response.session else None,
         "refresh_token": response.session.refresh_token if response.session else None,
-        "message": "Account created successfully. Check your email to confirm."
+        "message": "Account created successfully. Check your email to confirm.",
     }
 
 
-async def login(email: str, password: str) -> dict:
-    """
-    Authenticate an existing user. Returns session tokens on success.
-    """
-    supabase = get_supabase()
-
+def _login_sync(email: str, password: str) -> dict:
+    auth = get_auth_client()
     try:
-        response = supabase.auth.sign_in_with_password({
-            "email": email,
-            "password": password,
-        })
-    except AuthApiError as e:
-        # Don't leak whether email exists — use generic message
+        response = auth.auth.sign_in_with_password({"email": email, "password": password})
+    except AuthApiError:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     if not response.user or not response.session:
         raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    # Fetch tier from profiles table, auto-create if missing
-    profile = supabase.table("profiles").select("tier").eq("id", response.user.id).execute()
+    db = get_supabase()
+    profile = db.table("profiles").select("tier").eq("id", response.user.id).execute()
     if not profile.data:
-        # Profile missing — create it now (handles edge cases from signup)
-        supabase.table("profiles").upsert({
-            "id": response.user.id,
-            "email": email,
-            "tier": "free",
-        }).execute()
+        db.table("profiles").upsert(
+            {"id": response.user.id, "email": email, "tier": "free"}
+        ).execute()
         tier = "free"
     else:
         tier = profile.data[0]["tier"]
@@ -100,22 +84,9 @@ async def login(email: str, password: str) -> dict:
     }
 
 
-async def verify_token(authorization: str = Header(...)) -> UserProfile:
-    """
-    FastAPI dependency — extracts and verifies the JWT from Authorization header.
-    Usage: add `user: UserProfile = Depends(verify_token)` to any protected endpoint.
-
-    Returns a UserProfile with id, email, and tier so endpoints can
-    make tier-based decisions without an extra DB call.
-    """
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Invalid authorization header format.")
-
-    token = authorization.replace("Bearer ", "").strip()
-    supabase = get_supabase()
-
+def _verify_sync(token: str) -> UserProfile:
     try:
-        user_response = supabase.auth.get_user(token)
+        user_response = get_token_verifier().auth.get_user(token)
     except AuthApiError:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
@@ -123,28 +94,43 @@ async def verify_token(authorization: str = Header(...)) -> UserProfile:
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
 
     user = user_response.user
-
-    # Fetch tier from profiles
-    profile = supabase.table("profiles").select("tier").eq("id", user.id).execute()
+    profile = get_supabase().table("profiles").select("tier").eq("id", user.id).execute()
     tier = profile.data[0]["tier"] if profile.data else "free"
-
-    return UserProfile(
-        id=user.id,
-        email=user.email,
-        tier=tier,
-    )
+    return UserProfile(id=user.id, email=user.email, tier=tier)
 
 
-async def get_optional_user(authorization: str = Header(default=None)) -> UserProfile | None:
-    """
-    Optional auth dependency — returns a UserProfile if a valid token is present,
-    or None if no token provided. Used for endpoints that serve both
-    authenticated and anonymous users differently (e.g. signal feed with
-    limited results for anonymous, full feed for Pro users).
-    """
-    if not authorization:
+async def signup(email: str, password: str) -> dict:
+    return await run_in_threadpool(_signup_sync, email, password)
+
+
+async def login(email: str, password: str) -> dict:
+    return await run_in_threadpool(_login_sync, email, password)
+
+
+async def verify_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> UserProfile:
+    """Use on protected routes: `user: UserProfile = Depends(verify_token)`."""
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+        or not credentials.credentials.strip()
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid authorization header.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await run_in_threadpool(_verify_sync, credentials.credentials.strip())
+
+
+async def get_optional_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> UserProfile | None:
+    """Returns the user if a valid token is sent, otherwise None (anonymous)."""
+    if credentials is None:
         return None
     try:
-        return await verify_token(authorization)
+        return await verify_token(credentials)
     except HTTPException:
         return None
