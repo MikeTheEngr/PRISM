@@ -20,9 +20,11 @@ DESIGN PRINCIPLES (non-negotiable for a fintech product):
    the page shouldn't see the direction flip-flop from prompt randomness).
 """
 
+import asyncio
 import json
+import logging
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -31,14 +33,23 @@ from pydantic import BaseModel, ValidationError, field_validator
 from app.core.config import get_settings
 from app.core.cache import get_cache
 from app.models.market import AssetPrice, SignalOut
+from app.utils.errors import describe_error
 
+logger = logging.getLogger("prism.signals")
 settings = get_settings()
 
+# One generation per asset at a time: if several requests ask for the same
+# asset while the cache is empty, they share a single AI call.
+_inflight: dict[str, "asyncio.Task[Optional[SignalOut]]"] = {}
+
+import os
+
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Model names can be changed with environment variables when a model is retired.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 class _RawSignal(BaseModel):
     """Strict schema the AI's JSON output must conform to before we trust it."""
@@ -126,14 +137,16 @@ async def _call_groq(prompt: str) -> Optional[dict]:
                 json={
                     "model": GROQ_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.3,  # low temperature — we want consistent, grounded output
-                    "max_tokens": 300,
+                    "temperature": 0.3,  # low temperature: consistent, grounded output
+                    "max_tokens": 1000,
+                    "response_format": {"type": "json_object"},  # JSON mode
                 },
             )
             resp.raise_for_status()
             content = resp.json()["choices"][0]["message"]["content"]
             return _extract_json(content)
-    except Exception:
+    except Exception as exc:
+        logger.warning("groq call failed: %s", describe_error(exc))
         return None
 
 
@@ -143,34 +156,27 @@ async def _call_gemini(prompt: str) -> Optional[dict]:
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                f"{GEMINI_API_URL}?key={settings.GEMINI_API_KEY}",
+                GEMINI_API_URL,
+                # The key goes in a header, not in the URL, so it can't leak into logs.
+                headers={"x-goog-api-key": settings.GEMINI_API_KEY},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3, "maxOutputTokens": 300},
+                    "generationConfig": {
+                        "temperature": 0.3,
+                        "maxOutputTokens": 1000,
+                        "responseMimeType": "application/json",
+                    },
                 },
             )
             resp.raise_for_status()
             content = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
             return _extract_json(content)
-    except Exception:
+    except Exception as exc:
+        logger.warning("gemini call failed: %s", describe_error(exc))
         return None
 
 
-async def generate_signal(asset: AssetPrice) -> Optional[SignalOut]:
-    """
-    Generate a signal for one asset. Tries Groq first, falls back to Gemini.
-    Returns None if both fail or output fails validation — callers must
-    handle the absence of a signal gracefully (never fabricate one).
-    """
-    cache = get_cache()
-    cache_key = f"signal:{asset.asset_class}:{asset.symbol}"
-
-    cached = await cache.get(cache_key)
-    if cached:
-        if isinstance(cached, str):
-            cached = json.loads(cached)
-        return SignalOut(**cached)
-
+async def _generate(asset: AssetPrice, cache_key: str) -> Optional[SignalOut]:
     prompt = _build_prompt(asset)
 
     raw = await _call_groq(prompt)
@@ -181,14 +187,17 @@ async def generate_signal(asset: AssetPrice) -> Optional[SignalOut]:
         model_used = "gemini"
 
     if raw is None:
+        logger.warning("no signal for %s: both providers failed", asset.symbol)
         return None
 
     try:
         validated = _RawSignal(**raw)
-    except ValidationError:
-        # AI returned something that doesn't meet our schema/safety bar.
-        # We do NOT show a degraded/guessed signal — absence is safer than
-        # a malformed or out-of-spec one in a financial context.
+    except (ValidationError, TypeError) as exc:
+        # Out-of-spec AI output is discarded, never shown or "repaired".
+        logger.warning(
+            "discarded invalid %s output for %s: %s",
+            model_used, asset.symbol, type(exc).__name__,
+        )
         return None
 
     signal = SignalOut(
@@ -199,5 +208,31 @@ async def generate_signal(asset: AssetPrice) -> Optional[SignalOut]:
         generated_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    await cache.set(cache_key, signal.model_dump(), settings.CACHE_TTL_SIGNAL)
+    await get_cache().set(cache_key, signal.model_dump(), settings.CACHE_TTL_SIGNAL)
     return signal
+
+
+async def generate_signal(asset: AssetPrice) -> Optional[SignalOut]:
+    """
+    Generate a signal for one asset (Groq first, Gemini fallback).
+    Returns None if both fail or output fails validation — callers must handle
+    the absence of a signal (never fabricate one).
+    """
+    cache_key = f"signal:{asset.asset_class}:{asset.symbol}"
+
+    cached = await get_cache().get(cache_key)
+    if cached:
+        try:
+            return SignalOut(**cached)
+        except Exception:
+            logger.warning("ignoring malformed cached signal for %s", asset.symbol)
+
+    task = _inflight.get(cache_key)
+    if task is None:
+        task = asyncio.create_task(_generate(asset, cache_key))
+        _inflight[cache_key] = task
+        task.add_done_callback(lambda _t, k=cache_key: _inflight.pop(k, None))
+
+    # shield: if one waiting request disconnects, it must not cancel the
+    # shared task that other requests are still waiting on.
+    return await asyncio.shield(task)
