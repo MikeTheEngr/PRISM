@@ -40,6 +40,7 @@ class Cache:
         self.enabled = bool(self.base_url and self.token)
         self._memory: dict[str, tuple[float, str]] = {}  # key -> (expires_at, json)
         self._redis_down_until = 0.0
+        self._client: Optional[httpx.AsyncClient] = None
         if not self.enabled:
             logger.warning("Upstash not configured: using memory cache only.")
 
@@ -78,13 +79,24 @@ class Cache:
         return {"Authorization": f"Bearer {self.token}"}
 
     async def _command(self, *cmd: Any) -> Any:
-        async with httpx.AsyncClient(timeout=_REDIS_TIMEOUT) as client:
-            resp = await client.post(self.base_url, headers=self._headers(), json=list(cmd))
+        # One shared connection: avoids a new TCP+TLS handshake on every call,
+        # which is slow on weak connections.
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_REDIS_TIMEOUT)
+        try:
+            resp = await self._client.post(self.base_url, headers=self._headers(), json=list(cmd))
             resp.raise_for_status()
             body = resp.json()
-            if "error" in body:
-                raise RuntimeError(body["error"])
-            return body.get("result")
+        except Exception:
+            client, self._client = self._client, None  # rebuild on the next call
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+            raise
+        if "error" in body:
+            raise RuntimeError(body["error"])
+        return body.get("result")
 
     # ---------- public API ----------
     async def get(self, key: str) -> Optional[Any]:

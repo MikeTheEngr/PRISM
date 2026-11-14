@@ -16,9 +16,6 @@ from app.models.market import AssetPrice
 from app.services.alpha_vantage_client import fetch_stock_price
 from app.services.coingecko_client import fetch_crypto_prices_batch
 
-# Stocks go through a small pool: concurrent, but gentle on Alpha Vantage's free tier.
-_STOCK_CONCURRENCY = 2
-
 
 async def load_active_assets() -> list[dict]:
     def _query():
@@ -41,7 +38,6 @@ async def load_asset(symbol: str) -> Optional[dict]:
 async def fetch_prices(assets: list[dict]) -> list[AssetPrice]:
     crypto = [a for a in assets if a["asset_class"] == "crypto"]
     stocks = [a for a in assets if a["asset_class"] == "stock"]
-    sem = asyncio.Semaphore(_STOCK_CONCURRENCY)
 
     async def _crypto() -> list[AssetPrice]:
         if not crypto:
@@ -51,8 +47,7 @@ async def fetch_prices(assets: list[dict]) -> list[AssetPrice]:
         )
 
     async def _stock(a: dict) -> Optional[AssetPrice]:
-        async with sem:
-            return await fetch_stock_price(a["symbol"], a["name"])
+        return await fetch_stock_price(a["symbol"], a["name"])
 
     crypto_prices, *stock_prices = await asyncio.gather(_crypto(), *[_stock(a) for a in stocks])
     return [*crypto_prices, *[p for p in stock_prices if p]]

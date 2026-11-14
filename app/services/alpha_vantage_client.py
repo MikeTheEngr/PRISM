@@ -14,6 +14,7 @@ If this becomes a bottleneck, Polygon.io is the documented upgrade path
 only requires changes inside this file, not callers.
 """
 
+import asyncio
 import json
 import httpx
 from datetime import datetime, timezone
@@ -24,7 +25,7 @@ from app.core.config import get_settings
 from app.models.market import AssetPrice
 
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
-
+_http_gate = asyncio.Semaphore(1)  # one live Alpha Vantage call at a time
 
 async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
     """
@@ -48,7 +49,7 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with _http_gate, httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(
                 ALPHA_VANTAGE_BASE,
                 params={
