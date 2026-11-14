@@ -75,6 +75,7 @@ class _RawSignal(BaseModel):
     @field_validator("reasoning")
     @classmethod
     def validate_reasoning(cls, v: str) -> str:
+        v = v.replace("\u202f", " ").replace("\u00a0", " ").replace("\u2011", "-")
         v = v.strip()
         if len(v) < 10:
             raise ValueError("Reasoning too short to be meaningful")

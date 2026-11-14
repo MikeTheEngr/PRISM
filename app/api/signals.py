@@ -1,97 +1,64 @@
 """
 PRISM Backend — Signals API
 
-Serves AI-generated signals for assets. A signal is only returned if
-generation succeeded and passed validation — see services/signal_engine.py
-for why we never fabricate or degrade a signal to "fill in" a gap.
+A signal is only returned if generation succeeded and passed validation (see
+services/signal_engine.py). We never invent a signal to fill a gap.
+
+Tier gating:
+- Anonymous: top 3 signals (a teaser), and NO per-symbol access.
+- Free: top 5.   Pro: everything.
+The per-symbol endpoint used to have no login check, which let anyone read
+every signal one symbol at a time and skip the teaser limit.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+import asyncio
 from typing import Optional
 
-from app.core.database import get_supabase
-from app.services.coingecko_client import fetch_crypto_prices_batch
-from app.services.alpha_vantage_client import fetch_stock_price
-from app.services.signal_engine import generate_signal
-from app.services.auth_service import get_optional_user
-from app.models.market import SignalOut
+from fastapi import APIRouter, Depends, HTTPException
+
 from app.models.auth import UserProfile
+from app.models.market import SignalOut
+from app.services.auth_service import get_optional_user, verify_token
+from app.services.market_service import fetch_price, fetch_prices, load_active_assets, load_asset
+from app.services.signal_engine import generate_signal
 
 router = APIRouter(prefix="/signals", tags=["signals"])
+
+# At most this many AI calls at once, so a cold cache doesn't hit provider rate limits.
+_LLM_CONCURRENCY = 4
 
 
 @router.get("", response_model=list[SignalOut])
 async def list_signals(user: Optional[UserProfile] = Depends(get_optional_user)):
-    """
-    Returns signals for all active assets.
-    - Anonymous users: first 3 signals only (teaser)
-    - Free tier users: up to 5 signals
-    - Pro users: all signals, no limit
-    """
-    supabase = get_supabase()
-    result = supabase.table("assets").select("*").eq("is_active", True).execute()
-    assets = result.data
-
+    assets = await load_active_assets()
     if not assets:
         return []
 
-    signals: list[SignalOut] = []
+    prices = await fetch_prices(assets)
+    sem = asyncio.Semaphore(_LLM_CONCURRENCY)
 
-    crypto_assets = [a for a in assets if a["asset_class"] == "crypto"]
-    stock_assets = [a for a in assets if a["asset_class"] == "stock"]
+    async def _one(price):
+        async with sem:
+            return await generate_signal(price)
 
-    if crypto_assets:
-        crypto_prices = await fetch_crypto_prices_batch(
-            [{"symbol": a["symbol"], "provider_id": a["provider_id"], "name": a["name"]} for a in crypto_assets]
-        )
-        for price in crypto_prices:
-            signal = await generate_signal(price)
-            if signal:
-                signals.append(signal)
+    results = await asyncio.gather(*[_one(p) for p in prices])
+    signals = sorted((s for s in results if s), key=lambda s: s.confidence, reverse=True)
 
-    for asset in stock_assets:
-        price = await fetch_stock_price(asset["symbol"], asset["name"])
-        if price:
-            signal = await generate_signal(price)
-            if signal:
-                signals.append(signal)
-
-    # Sort by confidence — most actionable first
-    signals.sort(key=lambda s: s.confidence, reverse=True)
-
-    # Apply tier limits
     if user is None:
-        # Anonymous — show 3 as a teaser, prompt to sign up
         return signals[:3]
-    elif user.tier == "free":
+    if user.tier == "free":
         return signals[:5]
-    else:
-        # Pro — full access
-        return signals
+    return signals
 
 
 @router.get("/{symbol}", response_model=SignalOut)
-async def get_signal(symbol: str):
-    """
-    Returns the signal for a single asset. Powers the Asset Detail View's
-    signal breakdown panel.
-    """
-    supabase = get_supabase()
-    result = supabase.table("assets").select("*").eq("symbol", symbol.upper()).eq("is_active", True).execute()
-
-    if not result.data:
+async def get_signal(symbol: str, user: UserProfile = Depends(verify_token)):
+    """Single-asset signal. Requires login."""
+    asset = await load_asset(symbol)
+    if not asset:
         raise HTTPException(status_code=404, detail=f"Asset '{symbol}' not found")
 
-    asset = result.data[0]
-
-    if asset["asset_class"] == "crypto":
-        prices = await fetch_crypto_prices_batch(
-            [{"symbol": asset["symbol"], "provider_id": asset["provider_id"], "name": asset["name"]}]
-        )
-        price = prices[0] if prices else None
-    else:
-        price = await fetch_stock_price(asset["symbol"], asset["name"])
-
+    price = await fetch_price(asset)
     if not price:
         raise HTTPException(
             status_code=503,
@@ -104,5 +71,4 @@ async def get_signal(symbol: str):
             status_code=503,
             detail=f"Signal generation temporarily unavailable for '{symbol}'. Please try again shortly.",
         )
-
     return signal
