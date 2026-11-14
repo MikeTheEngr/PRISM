@@ -7,6 +7,7 @@ parallel instead of one by one.
 """
 
 import asyncio
+import logging
 from typing import Optional
 
 from fastapi.concurrency import run_in_threadpool
@@ -16,12 +17,17 @@ from app.models.market import AssetPrice
 from app.services.alpha_vantage_client import fetch_stock_price
 from app.services.coingecko_client import fetch_crypto_prices_batch
 
+logger = logging.getLogger("prism.market")
+
 
 async def load_active_assets() -> list[dict]:
     def _query():
         return get_supabase().table("assets").select("*").eq("is_active", True).execute().data
 
-    return await run_in_threadpool(_query) or []
+    rows = await run_in_threadpool(_query) or []
+    if not rows:
+        logger.warning("assets table returned 0 active rows (check SUPABASE_URL / SUPABASE_SERVICE_KEY)")
+    return rows
 
 
 async def load_asset(symbol: str) -> Optional[dict]:
@@ -50,7 +56,15 @@ async def fetch_prices(assets: list[dict]) -> list[AssetPrice]:
         return await fetch_stock_price(a["symbol"], a["name"])
 
     crypto_prices, *stock_prices = await asyncio.gather(_crypto(), *[_stock(a) for a in stocks])
-    return [*crypto_prices, *[p for p in stock_prices if p]]
+    stock_ok = [p for p in stock_prices if p]
+
+    # Only logs when something is missing, so normal requests stay quiet.
+    if len(crypto_prices) < len(crypto) or len(stock_ok) < len(stocks):
+        logger.warning(
+            "prices missing: crypto %d/%d, stocks %d/%d",
+            len(crypto_prices), len(crypto), len(stock_ok), len(stocks),
+        )
+    return [*crypto_prices, *stock_ok]
 
 
 async def fetch_price(asset: dict) -> Optional[AssetPrice]:
