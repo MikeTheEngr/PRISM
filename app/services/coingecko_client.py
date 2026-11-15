@@ -83,23 +83,40 @@ async def fetch_crypto_price(symbol: str, provider_id: str, name: str) -> Option
         logger.warning("coingecko single fetch failed for %s: %s", provider_id, describe_error(exc))
         return None
 
-
 async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
     """
     assets: list of {symbol, provider_id, name} dicts.
     Fetches all in a single CoinGecko call to conserve the rate limit.
+
+    If CoinGecko fails or rate-limits us, the last good prices (kept for 24h)
+    are returned marked is_stale=True, so the site shows "delayed" prices
+    instead of going empty.
     """
     cache = get_cache()
     settings = get_settings()
 
     provider_ids = [a["provider_id"] for a in assets]
     cache_key = f"price:crypto:batch:{','.join(sorted(provider_ids))}"
+    stale_key = f"{cache_key}:last_good"
 
     cached = await cache.get(cache_key)
     if cached:
         if isinstance(cached, str):
             cached = json.loads(cached)
         return [AssetPrice(**item) for item in cached]
+
+    async def _stale() -> list[AssetPrice]:
+        last = await cache.get(stale_key)
+        if not last:
+            return []
+        if isinstance(last, str):
+            last = json.loads(last)
+        out = []
+        for item in last:
+            item["is_stale"] = True
+            out.append(AssetPrice(**item))
+        logger.warning("serving %d delayed crypto prices from the last-good copy", len(out))
+        return out
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -140,15 +157,15 @@ async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
 
             if not results:
                 logger.warning("coingecko returned no usable prices (ids may be wrong)")
-                return []
+                return await _stale()
 
-            await cache.set(
-                cache_key,
-                [r.model_dump() for r in results],
-                settings.CACHE_TTL_CRYPTO_PRICE,
-            )
+            dumped = [r.model_dump() for r in results]
+            await cache.set(cache_key, dumped, settings.CACHE_TTL_CRYPTO_PRICE)
+            await cache.set(stale_key, dumped, settings.CACHE_TTL_STALE_FALLBACK)
             return results
 
     except Exception as exc:
         logger.warning("coingecko batch fetch failed: %s", describe_error(exc))
-        return []
+        return await _stale()
+
+
