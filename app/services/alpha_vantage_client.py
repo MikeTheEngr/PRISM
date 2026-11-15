@@ -54,6 +54,10 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
     if not settings.ALPHA_VANTAGE_API_KEY:
         return await _stale()
 
+    if await cache.get("av:limited"):
+        # Alpha Vantage said "quota used up" recently: don't keep asking.
+        return await _stale()
+
     try:
         async with _http_gate, httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(
@@ -65,12 +69,16 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
                 },
             )
             resp.raise_for_status()
-            raw = resp.json().get("Global Quote", {})
+            body = resp.json()
+            raw = body.get("Global Quote", {})
+            limited = "Information" in body or "Note" in body
 
             if not raw or "05. price" not in raw:
                 # Alpha Vantage returns an empty object or a rate-limit message
                 # (not an HTTP error) when the quota is exhausted.
                 logger.warning("alpha vantage returned no quote for %s (quota exhausted?)", symbol)
+                if limited:
+                    await cache.set("av:limited", True, 3600)  # stop asking for 1 hour
                 return await _stale()
 
             price = float(raw.get("05. price", 0))

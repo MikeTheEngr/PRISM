@@ -25,7 +25,7 @@ from app.services.signal_engine import generate_signal
 router = APIRouter(prefix="/signals", tags=["signals"])
 
 # At most this many AI calls at once, so a cold cache doesn't hit provider rate limits.
-_LLM_CONCURRENCY = 4
+_LLM_CONCURRENCY = 2
 
 
 @router.get("", response_model=list[SignalOut])
