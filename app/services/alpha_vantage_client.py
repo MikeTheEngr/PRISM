@@ -1,21 +1,18 @@
 """
 PRISM Backend — Alpha Vantage Client (Stock Market Data)
 
-IMPORTANT CONSTRAINT: Alpha Vantage's free tier allows roughly 25 requests/day
-total. This is the single biggest constraint on Phase 1's stock coverage and
-must be respected aggressively:
-  - Long cache TTL (5 min minimum, longer outside market hours)
-  - Batch/sequential fetching only at controlled intervals, never per-user-request
-  - A background refresh job (not built here yet) should populate cache on a
-    schedule rather than relying on user traffic to trigger fetches
-
-If this becomes a bottleneck, Polygon.io is the documented upgrade path
-(see Phase 1 roadmap) — this client is written so swapping providers later
-only requires changes inside this file, not callers.
+Alpha Vantage's free tier allows roughly 25 requests/day, so:
+  - prices are cached for CACHE_TTL_STOCK_PRICE seconds
+  - the last good price is kept for 24h and served as "delayed" when the quota
+    runs out, so stocks don't vanish
+  - only one live call runs at a time
+Failures are logged (type and status only; the URL contains the API key and
+must never be logged).
 """
 
 import asyncio
 import json
+import logging
 import httpx
 from datetime import datetime, timezone
 from typing import Optional
@@ -23,15 +20,15 @@ from typing import Optional
 from app.core.cache import get_cache
 from app.core.config import get_settings
 from app.models.market import AssetPrice
+from app.utils.errors import describe_error
 
+logger = logging.getLogger("prism.alphavantage")
 ALPHA_VANTAGE_BASE = "https://www.alphavantage.co/query"
 _http_gate = asyncio.Semaphore(1)  # one live Alpha Vantage call at a time
 
+
 async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
-    """
-    Fetch current price data for a single stock.
-    Uses GLOBAL_QUOTE endpoint — lightest-weight Alpha Vantage call available.
-    """
+    """Fetch current price data for a single stock (GLOBAL_QUOTE endpoint)."""
     cache = get_cache()
     settings = get_settings()
     cache_key = f"price:stock:{symbol}"
@@ -43,10 +40,19 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
         cached["is_stale"] = False
         return AssetPrice(**cached)
 
-    if not settings.ALPHA_VANTAGE_API_KEY:
-        # No key configured — fail gracefully rather than throwing,
-        # consistent with how the crypto client degrades.
+    stale_key = f"{cache_key}:last_good"
+
+    async def _stale() -> Optional[AssetPrice]:
+        """Last known price, flagged stale: quota trouble shows older data
+        instead of making the stock disappear."""
+        last = await cache.get(stale_key)
+        if last:
+            last["is_stale"] = True
+            return AssetPrice(**last)
         return None
+
+    if not settings.ALPHA_VANTAGE_API_KEY:
+        return await _stale()
 
     try:
         async with _http_gate, httpx.AsyncClient(timeout=8.0) as client:
@@ -62,9 +68,10 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
             raw = resp.json().get("Global Quote", {})
 
             if not raw or "05. price" not in raw:
-                # Alpha Vantage returns an empty object or a rate-limit
-                # message (not an HTTP error) when the quota is exhausted.
-                return None
+                # Alpha Vantage returns an empty object or a rate-limit message
+                # (not an HTTP error) when the quota is exhausted.
+                logger.warning("alpha vantage returned no quote for %s (quota exhausted?)", symbol)
+                return await _stale()
 
             price = float(raw.get("05. price", 0))
             change_pct_str = raw.get("10. change percent", "0%").replace("%", "")
@@ -83,7 +90,9 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
             )
 
             await cache.set(cache_key, result.model_dump(), settings.CACHE_TTL_STOCK_PRICE)
+            await cache.set(stale_key, result.model_dump(), settings.CACHE_TTL_STALE_FALLBACK)
             return result
 
-    except Exception:
-        return None
+    except Exception as exc:
+        logger.warning("alpha vantage fetch failed for %s: %s", symbol, describe_error(exc))
+        return await _stale()

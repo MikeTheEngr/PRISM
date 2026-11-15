@@ -1,13 +1,13 @@
 """
 PRISM Backend — CoinGecko Client (Crypto Market Data)
 
-CoinGecko's free tier has no API key requirement for basic endpoints and
-generous rate limits (~10-30 calls/min), making it the right default for
-crypto data in Phase 1. Cached aggressively regardless, since concurrent
-users would otherwise multiply the request count fast.
+Cached aggressively, since concurrent users would otherwise multiply the
+request count fast. Failures are logged (type and status only) instead of
+being swallowed silently.
 """
 
 import json
+import logging
 import httpx
 from datetime import datetime, timezone
 from typing import Optional
@@ -15,8 +15,16 @@ from typing import Optional
 from app.core.cache import get_cache
 from app.core.config import get_settings
 from app.models.market import AssetPrice
+from app.utils.errors import describe_error
 
+logger = logging.getLogger("prism.coingecko")
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+
+
+def _headers() -> dict:
+    """Sends a CoinGecko Demo key if COINGECKO_API_KEY is set (steadier limits)."""
+    key = get_settings().COINGECKO_API_KEY
+    return {"x-cg-demo-api-key": key} if key else {}
 
 
 async def fetch_crypto_price(symbol: str, provider_id: str, name: str) -> Optional[AssetPrice]:
@@ -39,6 +47,7 @@ async def fetch_crypto_price(symbol: str, provider_id: str, name: str) -> Option
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.get(
                 f"{COINGECKO_BASE}/simple/price",
+                headers=_headers(),
                 params={
                     "ids": provider_id,
                     "vs_currencies": "usd",
@@ -69,17 +78,16 @@ async def fetch_crypto_price(symbol: str, provider_id: str, name: str) -> Option
             await cache.set(cache_key, result.model_dump(), settings.CACHE_TTL_CRYPTO_PRICE)
             return result
 
-    except Exception:
-        # On failure, do NOT raise — a fintech dashboard should degrade
-        # gracefully (show stale/cached/missing data) rather than crash
-        # the whole response for one failed asset.
+    except Exception as exc:
+        # Don't raise: degrade gracefully, but leave a trace.
+        logger.warning("coingecko single fetch failed for %s: %s", provider_id, describe_error(exc))
         return None
 
 
 async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
     """
     assets: list of {symbol, provider_id, name} dicts.
-    Fetches all in a single CoinGecko call where possible to conserve rate limit.
+    Fetches all in a single CoinGecko call to conserve the rate limit.
     """
     cache = get_cache()
     settings = get_settings()
@@ -97,6 +105,7 @@ async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(
                 f"{COINGECKO_BASE}/simple/price",
+                headers=_headers(),
                 params={
                     "ids": ",".join(provider_ids),
                     "vs_currencies": "usd",
@@ -129,6 +138,10 @@ async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
                     )
                 )
 
+            if not results:
+                logger.warning("coingecko returned no usable prices (ids may be wrong)")
+                return []
+
             await cache.set(
                 cache_key,
                 [r.model_dump() for r in results],
@@ -136,5 +149,6 @@ async def fetch_crypto_prices_batch(assets: list[dict]) -> list[AssetPrice]:
             )
             return results
 
-    except Exception:
+    except Exception as exc:
+        logger.warning("coingecko batch fetch failed: %s", describe_error(exc))
         return []
