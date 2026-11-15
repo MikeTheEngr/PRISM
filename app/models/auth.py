@@ -25,6 +25,7 @@ class UserProfile(BaseModel):
     id: str
     email: str
     tier: str  # 'free' | 'pro'
+    early_access: bool = False
 
     @property
     def is_pro(self) -> bool:

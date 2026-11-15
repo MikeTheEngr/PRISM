@@ -49,6 +49,7 @@ async def get_profile(user: UserProfile = Depends(verify_token)):
         "email": user.email,
         "tier": user.tier,
         "is_pro": user.is_pro,
+        "early_access": user.early_access,
         "limits": {
             "signals_per_session": user.signal_limit,
             "watchlist_slots": user.watchlist_limit,
