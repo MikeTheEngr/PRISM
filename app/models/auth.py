@@ -48,3 +48,8 @@ class AuthResponse(BaseModel):
     access_token: str | None
     refresh_token: str | None
     message: str | None = None
+
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=10, max_length=2048)

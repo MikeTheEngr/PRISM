@@ -134,3 +134,29 @@ async def get_optional_user(
         return await verify_token(credentials)
     except HTTPException:
         return None
+    
+
+
+def _refresh_sync(refresh_token: str) -> dict:
+    try:
+        response = get_auth_client().auth.refresh_session(refresh_token)
+    except AuthApiError:
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+
+    if not response.user or not response.session:
+        raise HTTPException(status_code=401, detail="Session expired. Please log in again.")
+
+    profile = get_supabase().table("profiles").select("tier").eq("id", response.user.id).execute()
+    tier = profile.data[0]["tier"] if profile.data else "free"
+
+    return {
+        "user_id": response.user.id,
+        "email": response.user.email,
+        "tier": tier,
+        "access_token": response.session.access_token,
+        "refresh_token": response.session.refresh_token,
+    }
+
+
+async def refresh(refresh_token: str) -> dict:
+    return await run_in_threadpool(_refresh_sync, refresh_token)

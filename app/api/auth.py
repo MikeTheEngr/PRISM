@@ -1,12 +1,12 @@
 """
 PRISM Backend — Auth API
 
-Signup, login, and profile endpoints.
+Signup, login, token refresh, and profile endpoints.
 """
 
 from fastapi import APIRouter, Depends
-from app.models.auth import SignupRequest, LoginRequest, AuthResponse, UserProfile
-from app.services.auth_service import signup, login, verify_token
+from app.models.auth import SignupRequest, LoginRequest, RefreshRequest, AuthResponse, UserProfile
+from app.services.auth_service import signup, login, refresh, verify_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -24,18 +24,25 @@ async def register(payload: SignupRequest):
 async def sign_in(payload: LoginRequest):
     """
     Authenticate and receive access + refresh tokens.
-    Store the access_token on the client and include it as:
-    Authorization: Bearer <access_token>
-    on all protected requests.
+    Send the access_token as: Authorization: Bearer <access_token>
     """
     return await login(payload.email, payload.password)
+
+
+@router.post("/refresh", response_model=AuthResponse)
+async def refresh_session(payload: RefreshRequest):
+    """
+    Swap a refresh token for a fresh access token (and a NEW refresh token).
+    Refresh tokens are single-use: always store the new one that comes back.
+    """
+    return await refresh(payload.refresh_token)
 
 
 @router.get("/me")
 async def get_profile(user: UserProfile = Depends(verify_token)):
     """
     Returns the current authenticated user's profile and tier.
-    Protected — requires valid Bearer token.
+    Protected: requires a valid Bearer token.
     """
     return {
         "user_id": user.id,
@@ -45,5 +52,5 @@ async def get_profile(user: UserProfile = Depends(verify_token)):
         "limits": {
             "signals_per_session": user.signal_limit,
             "watchlist_slots": user.watchlist_limit,
-        }
+        },
     }
