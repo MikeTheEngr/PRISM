@@ -52,10 +52,12 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
         return None
 
     if not settings.ALPHA_VANTAGE_API_KEY:
+        logger.warning("ALPHA_VANTAGE_API_KEY is not set: stock prices are unavailable")
         return await _stale()
 
     if await cache.get("av:limited"):
         # Alpha Vantage said "quota used up" recently: don't keep asking.
+        logger.warning("alpha vantage paused (limit flag set); serving last known price for %s", symbol)
         return await _stale()
 
     try:
