@@ -85,8 +85,8 @@ async def fetch_stock_price(symbol: str, name: str) -> Optional[AssetPrice]:
                     daily = "per day" in msg.lower() or "daily" in msg.lower()
                     await cache.set("av:limited", True, 3600 if daily else 20)
                     logger.warning(
-                        "alpha vantage limit message for %s (%s): %s",
-                        symbol, "daily" if daily else "rate", msg[:120],
+                        "alpha vantage %s limit reached (fetching %s)",
+                        "daily" if daily else "rate", symbol,
                     )
                 else:
                     logger.warning("alpha vantage returned no quote for %s", symbol)
