@@ -496,14 +496,12 @@
     </div>
     <div class="nav-links">
       <a href="#how">How it works</a>
-      <a href="#pricing">Pricing</a>
       <span id="navAuth" style="display:contents"></span>
     </div>
   </div>
 </nav>
 
 <section class="hero">
-  <div class="hero-badge"><span class="dot"></span> Live crypto + stock intelligence</div>
   <h1>Your <span class="grad">unfair advantage</span><br>in every market.</h1>
   <p class="sub">Cross-market predictive intelligence for equities and digital assets. Navigate markets with greater clarity and conviction through a single unified platform.</p>
 
@@ -578,36 +576,6 @@
         <div class="step-num">03 / ACT</div>
         <h3>Transparent signals</h3>
         <p>Get a clear direction, a confidence score, and plain-language reasoning. You decide, PRISM just shows you the spectrum.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="pricing">
-  <div class="container">
-    <div class="eyebrow">Pricing</div>
-    <h2 class="section-title">Start free. <br> Upgrade when you're ready.</h2>
-
-    <div class="pricing-grid">
-      <div class="price-card">
-        <h4>Free</h4>
-        <div class="price-amount">$0<span>/month</span></div>
-        <ul class="price-list">
-          <li>Live crypto + stock prices</li>
-          <li>3 watchlist slots</li>
-          <li>Top 5 AI signals</li>
-          <li>Confidence + reasoning</li>
-        </ul>
-      </div>
-      <div class="price-card featured">
-        <div class="price-tag">COMING SOON</div>
-        <h4>Pro</h4>
-        <div class="price-amount">$19<span>/month</span></div>
-        <ul class="price-list">
-          <li>Everything in Free</li>
-          <li>Unlimited watchlist</li>
-          <li>Full AI signal feed</li>
-        </ul>
       </div>
     </div>
   </div>
@@ -708,7 +676,7 @@ function renderAuth(){
   $('heroIn').style.display=sess?'block':'none';$('start').style.display=sess?'none':'';
   document.querySelector('[data-tab=watch]').style.display=sess?'':'none';
   const lim=me&&me.limits&&me.limits.watchlist_slots;
-  $('liveTxt').textContent=sess?'LIVE · '+(me?me.tier.toUpperCase():'FREE')+(me&&me.early_access?' · FOUNDING MEMBER':'')+(lim?' · '+wl.length+'/'+lim+' slots':''):'LIVE';
+  $('liveTxt').textContent=sess?'LIVE'+(me&&me.early_access?' · FOUNDING MEMBER':'')+(lim?' · '+wl.length+'/'+lim+' slots':''):'LIVE';
 }
 async function loadAll(){
   const r=await Promise.allSettled([api('/assets'),api('/signals'),...(sess?[api('/auth/me'),api('/watchlist')]:[])]);
@@ -727,7 +695,7 @@ function renderList(){
   if(tab!=='watch')rows=rows.slice(0,5);
   $('signalList').innerHTML=rows.map(a=>{
     const s=sigs[a.symbol],up=(a.change_24h_pct||0)>=0,c=a.asset_class==='crypto';
-    const badge=s?`<div class="conf-badge ${s.direction==='bullish'?'conf-bull':s.direction==='bearish'?'conf-bear':'conf-neutral'}">${Math.round(s.confidence)}% · ${esc(s.direction)}</div>`:`<div class="conf-badge conf-neutral">🔒 ${sess?'Pro':'Sign up'}</div>`;
+    const badge=s?`<div class="conf-badge ${s.direction==='bullish'?'conf-bull':s.direction==='bearish'?'conf-bear':'conf-neutral'}">${Math.round(s.confidence)}% · ${esc(s.direction)}</div>`:`<div class="conf-badge conf-neutral">🔒 ${sess?'Top 5 only':'Sign up'}</div>`;
     return `<div class="signal-row${a.symbol===sel?' sel':''}" data-sym="${esc(a.symbol)}"><div class="signal-left"><div class="asset-icon" style="${c?'background:rgba(124,58,237,.15);color:#a78bfa':'background:rgba(6,182,212,.15);color:#22d3ee'}">${esc(a.symbol)}</div><div><div class="asset-name">${esc(a.name)}</div><div class="asset-sub">${esc(a.symbol)}/USD${a.is_stale?' · delayed':''}</div></div></div><div class="signal-right"><div class="price-block"><div class="price">${fmt(a.price)}</div><div class="price-change ${up?'up':'down'}">${a.change_24h_pct==null?'—':(up?'+':'')+a.change_24h_pct.toFixed(2)+'%'}</div></div>${badge}${sess?`<button class="watch-btn" data-w="${esc(a.symbol)}" title="Toggle watchlist">${wl.includes(a.symbol)?'★':'☆'}</button>`:''}</div></div>`;
   }).join('');
   renderDetail();
@@ -737,9 +705,9 @@ function renderDetail(){
   $('dIcon').textContent=a.symbol;$('dIcon').style.cssText=c?'background:rgba(124,58,237,.15);color:#a78bfa':'background:rgba(6,182,212,.15);color:#22d3ee';
   $('dName').textContent=a.name;$('dSub').textContent=a.symbol+'/USD';
   $('dConf').textContent=s?Math.round(s.confidence)+'%':'—';
-  const d=$('dDir');d.textContent=s?s.direction.toUpperCase()+' SIGNAL':(sess?'PRO SIGNAL':'SIGN UP TO UNLOCK');
+  const d=$('dDir');d.textContent=s?s.direction.toUpperCase()+' SIGNAL':(sess?'OUTSIDE TOP 5':'SIGN UP TO UNLOCK');
   d.style.color=s?(s.direction==='bullish'?'var(--green)':s.direction==='bearish'?'var(--red)':'var(--text-secondary)'):'var(--cyan)';
-  $('dWhy').textContent=s?s.reasoning:(sess?'Beyond your top 5 signals — Pro will unlock the full feed.':'Create a free account to see the top AI signals with confidence and reasoning.');
+  $('dWhy').textContent=s?s.reasoning:(sess?'Signals are shown for the 5 highest-confidence assets right now.':'Create a free account to see the top AI signals with confidence and reasoning.');
 }
 $('signalList').onclick=e=>{
   const w=e.target.closest('[data-w]');if(w){toggleWatch(w.dataset.w);return}
